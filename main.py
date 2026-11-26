@@ -160,31 +160,29 @@ BUILDER_SYSTEM_PROMPT = """Ты — Dyad AI, экспертный full-stack р�
 """
 
 # ==========================================
-# 3. УПРАВЛЕНИЕ ПЕСОЧНИЦЕЙ (SUBPROCESS + PORT)
+# 3. УПРАВЛЕНИЕ ПЕСОЧНИЦЕЙ (ВСТРОЕННЫЙ РЕНДЕР)
 # ==========================================
 WORKSPACE_DIR = "dyad_workspace"
 APP_FILE = os.path.join(WORKSPACE_DIR, "app.py")
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
 
-def get_free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(('', 0))
-        return s.getsockname()[1]
-
-def stop_preview_server():
-    proc = st.session_state.get("preview_proc")
-    if proc and proc.poll() is None:
-        try:
-            proc.terminate()
-            proc.wait(timeout=3)
-        except Exception:
-            proc.kill()
-    st.session_state["preview_proc"] = None
-
-def start_preview_server():
-    stop_preview_server()
-    if not os.path.exists(APP_FILE):
-        return
+def render_generated_app(code_str: str):
+    """Выполняет сгенерированный код прямо внутри вкладки Preview."""
+    # Убираем st.set_page_config из сгенерированного кода, 
+    # так как он уже вызван в основном приложении (иначе будет ошибка Streamlit)
+    cleaned_code = re.sub(
+        r'st\.set_page_config\s*\(.*?\)', 
+        '', 
+        code_str, 
+        flags=re.DOTALL
+    )
+    
+    # Изолированное пространство имен для выполнения кода
+    exec_globals = {
+        "__name__": "__main__",
+        "st": st,
+    }
+    exec(cleaned_code, exec_globals)
     
     port = get_free_port()
     st.session_state["preview_port"] = port
@@ -391,8 +389,8 @@ if user_prompt:
 # --- ПРАВАЯ КОЛОНКА: ВОРКСПЕЙС (PREVIEW | CODE | RUNTIME) ---
 with right_col:
     tab_preview, tab_code = st.tabs(["🖥️ Preview (Живое приложение)", "📄 Code (app.py)"])
-    with tab_preview:
-        # Баннер ошибки Runtime + кнопка Auto-Fix как в Dyad
+        with tab_preview:
+        # Баннер ошибки Runtime + кнопка Auto-Fix
         if st.session_state.get("runtime_error"):
             st.error("⚠️ Ошибка при запуске сгенерированного приложения:")
             st.code(st.session_state["runtime_error"], language="bash")
@@ -407,19 +405,30 @@ with right_col:
                 _, fixed_code = parse_dyad_response(raw_fix, st.session_state["code"])
                 st.session_state["code"] = fixed_code
                 st.session_state["history"].append(fixed_code)
+                st.session_state["runtime_error"] = None
                 with open(APP_FILE, "w", encoding="utf-8") as f:
                     f.write(fixed_code)
-                start_preview_server()
                 st.rerun()
-        elif st.session_state.get("preview_port"):
-            port = st.session_state["preview_port"]
-            st.components.v1.iframe(f"http://localhost:{port}", height=640, scrolling=True)
+
+        elif st.session_state["code"]:
+            # Оборачиваем в контейнер, чтобы изолировать рендер
+            preview_box = st.container(border=True)
+            with preview_box:
+                try:
+                    render_generated_app(st.session_state["code"])
+                except Exception as e:
+                    import traceback
+                    st.session_state["runtime_error"] = traceback.format_exc()
+                    st.rerun()
         else:
             st.markdown("""
-                ⚡
-                Здесь появится превью вашего приложения
-                Отправьте запрос в чат слева, чтобы начать
+                <div style="text-align: center; padding: 80px 20px; color: #64748b;">
+                    <div style="font-size: 32px; margin-bottom: 10px;">⚡</div>
+                    <div style="font-weight: 600; color: #cbd5e1;">Здесь появится превью вашего приложения</div>
+                    <div style="font-size: 13px; margin-top: 4px;">Отправьте запрос в чат слева, чтобы начать</div>
+                </div>
             """, unsafe_allow_html=True)
+
 
     with tab_code:
         if st.session_state["code"]:
